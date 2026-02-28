@@ -1,150 +1,116 @@
-package com.underlink
+import com.underlink.R
 
-import android.Manifest
-import android.content.Context
-import android.content.pm.PackageManager
-import android.hardware.camera2.CameraCharacteristics
-import android.hardware.camera2.CameraManager
 import android.os.Bundle
-import android.util.Log
-import android.widget.Button
-import android.widget.Toast
-import androidx.activity.enableEdgeToEdge
+import android.widget.ProgressBar
+import android.widget.ScrollView
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
-import com.underlink.hardware.CameraEngine
-import com.underlink.hardware.TorchController
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.switchmaterial.SwitchMaterial
+import com.google.android.material.textfield.TextInputEditText
 
 class MainActivity : AppCompatActivity() {
 
-    private val CAMERA_PERMISSION_REQUEST_CODE = 100
-    private lateinit var cameraManager: CameraManager
-    
-    private var torchController: TorchController? = null
-    private var cameraEngine: CameraEngine? = null
+    private lateinit var modeSwitch: SwitchMaterial
+    private lateinit var txPanel: androidx.constraintlayout.widget.ConstraintLayout
+    private lateinit var rxPanel: andrzoidx.constraintlayout.widget.ConstraintLayout
+
+    private lateinit var pttButton: MaterialButton
+    private lateinit var sendButton: MaterialButton
+    private lateinit var messageInput: TextInputEditText
+    private lateinit var txStatus: TextView
+
+    private lateinit var rxLog: TextView
+    private lateinit var clearLogButton: MaterialButton
+    private lateinit var qualityBar: ProgressBar
+    private lateinit var logScroll: ScrollView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
         setContentView(R.layout.activity_main)
-        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.textureView)) { v, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
-            insets
-        }
 
-        cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        bindViews()
+        setupModeToggle()
+        setupTxControls()
+        setupRxControls()
 
-        findViewById<Button>(R.id.btnTestFlash).setOnClickListener {
-            testFlashlight()
-        }
+        appendLog("App started. Voice disabled for now.")
+    }
 
-        // Request camera permissions at startup
-        if (checkCameraPermission()) {
-            setupHardware()
-        } else {
-            requestCameraPermission()
+    private fun bindViews() {
+        modeSwitch = findViewById(R.id.modeSwitch)
+        txPanel = findViewById(R.id.txPanel)
+        rxPanel = findViewById(R.id.rxPanel)
+
+        pttButton = findViewById(R.id.pttButton)
+        sendButton = findViewById(R.id.sendButton)
+        messageInput = findViewById(R.id.messageInput)
+        txStatus = findViewById(R.id.txStatus)
+
+        rxLog = findViewById(R.id.rxLog)
+        clearLogButton = findViewById(R.id.clearLogButton)
+        qualityBar = findViewById(R.id.qualityBar)
+        logScroll = findViewById(R.id.logScroll)
+    }
+
+    private fun setupModeToggle() {
+        modeSwitch.isChecked = true // TX mode default
+        updateModeUi(isTx = true)
+
+        modeSwitch.setOnCheckedChangeListener { _, isChecked ->
+            updateModeUi(isTx = isChecked)
         }
     }
 
-    private fun checkCameraPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            this, Manifest.permission.CAMERA
-        ) == PackageManager.PERMISSION_GRANTED
+    private fun updateModeUi(isTx: Boolean) {
+        txPanel.visibility = if (isTx) android.view.View.VISIBLE else android.view.View.GONE
+        rxPanel.visibility = if (isTx) android.view.View.GONE else android.view.View.VISIBLE
+        modeSwitch.text = if (isTx) "TX Mode" else "RX Mode"
     }
 
-    private fun requestCameraPermission() {
-        ActivityCompat.requestPermissions(
-            this,
-            arrayOf(Manifest.permission.CAMERA),
-            CAMERA_PERMISSION_REQUEST_CODE
-        )
-    }
+    private fun setupTxControls() {
+        // Voice placeholder
+        pttButton.setOnClickListener {
+            txStatus.text = "Status: voice not wired yet"
+        }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == CAMERA_PERMISSION_REQUEST_CODE) {
-            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                setupHardware()
-            } else {
-                Toast.makeText(this, "Camera permission required.", Toast.LENGTH_LONG).show()
-                finish() // App cannot function without camera
+        // Typed message send
+        sendButton.setOnClickListener {
+            val text = messageInput.text?.toString()?.trim().orEmpty()
+            if (text.isEmpty()) {
+                txStatus.text = "Status: type something first"
+                return@setOnClickListener
             }
+            txStatus.text = "Status: sending typed message…"
+            sendMessage(text)
         }
     }
 
-    private fun setupHardware() {
-        try {
-            // Find the rear facing camera
-            val cameraIdList = cameraManager.cameraIdList
-            var rearCameraId: String? = null
-            
-            for (id in cameraIdList) {
-                val characteristics = cameraManager.getCameraCharacteristics(id)
-                val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
-                if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) {
-                    rearCameraId = id
-                    break
-                }
-            }
-
-            if (rearCameraId != null) {
-                // Initialize controllers
-                torchController = TorchController(cameraManager, rearCameraId)
-                torchController?.start()
-
-                cameraEngine = CameraEngine(this, cameraManager, rearCameraId)
-                
-                // Set up the listener to receive the 720 row-means from the bright/dark stripes
-                cameraEngine?.onFrameProcessedListener = { rowMeans ->
-                    // This runs ~30 times a second! 
-                    // Log the first value just to prove it's working without spamming Logcat too badly
-                    // Log.d("MainActivity", "Frame received, Row 0 mean: ${rowMeans[0]}")
-                }
-                
-                // Start capturing YUV frames!
-                cameraEngine?.startCamera()
-                
-            } else {
-                Log.e("MainActivity", "No rear camera found!")
-            }
-
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Failed to setup hardware", e)
-        }
+    private fun setupRxControls() {
+        clearLogButton.setOnClickListener { rxLog.text = "RX log:\n" }
+        qualityBar.progress = 30 // placeholder
     }
 
-    private fun testFlashlight() {
-        val torch = torchController ?: return
-        
-        // Generate an alternating 101010 pattern for testing
-        // At 180Hz, 360 bits = exactly 2 seconds of transmission
-        val testBits = BooleanArray(360) { i -> i % 2 == 0 } 
-        
-        Toast.makeText(this, "Flashing for 2 seconds...", Toast.LENGTH_SHORT).show()
-        
-        // Disable button to prevent spamming while transmitting
-        findViewById<Button>(R.id.btnTestFlash).isEnabled = false
-        
-        torch.transmitBits(testBits) {
-            // Callback runs when transmission is complete
-            runOnUiThread {
-                findViewById<Button>(R.id.btnTestFlash).isEnabled = true
-            }
-        }
+    // ===== Glue stubs (codec/hardware later) =====
+    private fun sendMessage(text: String) {
+        appendLog("TX: $text")
+
+        // Later:
+        // val bits = codec.encode(text)
+        // hardware.transmit(bits)
+
+        // Temporary loopback so RX UI shows something:
+        appendLog("RX (simulated): $text")
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        // Crucial: Clean up background threads and camera sessions when app closes
-        cameraEngine?.stopCamera()
-        torchController?.stop()
+    // Person 2 will call this later after camera decode:
+    fun onBitsReceived(bits: IntArray) {
+        val text = "[decoded placeholder] bits=${bits.size}"
+        appendLog("RX: $text")
+    }
+
+    private fun appendLog(line: String) {
+        rxLog.append(line + "\n")
+        logScroll.post { logScroll.fullScroll(android.view.View.FOCUS_DOWN) }
     }
 }

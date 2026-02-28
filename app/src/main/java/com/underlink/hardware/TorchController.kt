@@ -10,6 +10,10 @@ import android.util.Log
 
 class TorchController(private val cameraManager: CameraManager, private val cameraId: String) {
 
+    fun transmitBits(bits: IntArray, callback: (() -> Unit)? = null) {
+        transmitBits(bits.map { it == 1 }.toBooleanArray(), callback)
+    }
+
     private val tag = "TorchController"
     private var handlerThread: HandlerThread? = null
     private var handler: Handler? = null

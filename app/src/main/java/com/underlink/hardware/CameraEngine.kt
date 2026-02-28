@@ -18,26 +18,20 @@ class CameraEngine(
     private val tag = "CameraEngine"
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
-    private var imageReader: ImageReader? = null
+    private var imageReader: ImageReader? = ImageReader.newInstance(1280, 720, ImageFormat.YUV_420_888, 2)
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
 
     // Callbacks to pass processed frame data back to the decoder pipeline
     var onFrameProcessedListener: ((rowMeans: FloatArray) -> Unit)? = null
 
-    init {
-        // Initialize the ImageReader for YUV_420_888 at 1280x720. 
-        // 2 max images is usually sufficient for real-time processing without excessive memory buffering.
-        imageReader = ImageReader.newInstance(1280, 720, ImageFormat.YUV_420_888, 2).apply {
-            setOnImageAvailableListener(onImageAvailableListener, backgroundHandler)
-        }
-    }
 
     private fun startBackgroundThread() {
         backgroundThread = HandlerThread("CameraBackground").apply {
             start()
             backgroundHandler = Handler(looper)
         }
+        imageReader?.setOnImageAvailableListener(onImageAvailableListener, backgroundHandler)
     }
 
     private fun stopBackgroundThread() {
