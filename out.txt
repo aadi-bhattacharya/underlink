@@ -1,0 +1,569 @@
+Proposal for Problem Statement 3, Hackenza 20261
+Reliable Underwater Communication Using Smartphones.
+Aadi Bhattacharya1, B. Varun Kumar2, Mudit Kejriwal3, Rhythm Lalwani4
+1 2025B7PS1150G, aadiforacads@gmail.com
+2 2025AJPS1184G, acads.varun@gmail.com
+3 2025A7PS0867G, mudit.kejriwal12345@gmail.com
+4 2025A3PS0746G, rhythmlalwani2007@gmail.com
+Team POSIX Helpline.
+[Prepared for Prof. Arnab Paul.]
+Keywords:Keywords:Rolling Shutter Effect, Mie Scattering, Rayleigh Scattering, Convolutional Cod-
+ing, Block Interleaving, 4B5B Run-Length Limited Coding, Pulse Position Modulation, Viterbi Decod-
+ing, Adaptive Thresholding, Soft-Decision Decoding.
+Abstract.Radio-frequency communication fails underwater within centimetres due to severe
+signal attenuation, while acoustic systems require dedicated transducer hardware absent from
+consumer devices. Recent work by Chi et al. demonstrates that smartphone flashlights and cam-
+eras can close this gap by exploiting the rolling shutter effect of CMOS sensors: ON/OFF light
+pulses are captured as alternating bright and dark horizontal stripe patterns in video frames,
+achieving optical data transfer at ranges of 2.4-9.8 m. A counterintuitive property of the under-
+water channel makes this practical - water scattering enlarges the camera’s Region of Interest
+(RoI) and improves detectability rather than degrading it.
+We propose U-Flash: a software-only native Android application that enables optical com-
+munication between two unmodified smartphones using only the built-in rear flashlight and
+camera. A four-stage encoding pipeline addresses the channel’s failure modes in order of im-
+pact: a rate-1/2, constraint-length-4 convolutional code provides error correction; depth-20
+block interleaving converts burst errors from scattering events into isolated single-bit errors the
+Viterbi decoder handles well; 4B5B run-length limited coding prevents wide uniform stripes
+that destabilise the adaptive threshold; and 4-position pulse position modulation (4-PPM) makes
+symbol detection independent of absolute brightness, eliminating the dominant cause of thresh-
+old drift. On the receiver side, the Camera2 API is configured in fully manual mode with
+fixed exposure to prevent auto-exposure from corrupting luminance estimates; a sliding-window
+adaptive threshold computes a per-row decision level from local statistics; and a soft-decision
+Viterbi decoder with a burst-aware branch metric exploits the correlated structure of underwater
+errors. The design is scoped explicitly for a 24-hour implementation window: every component
+choice prioritises debuggability and correctness over theoretical optimality or maximum data
+rate. The strongerK= 7codec is validated in Python simulation and included in the technical
+report; the mobile demo runsK= 4. Target: BER<10 −2 at 1 m with ambient light variation;
+correct intelligible voice decode over a complete round-trip; no external hardware.
+1 Introduction
+Underwater wireless communication is a persistent engineering problem. Radio-frequency
+signals attenuate at roughly 0.18 dB/cm at 2.4 GHz, making Wi-Fi and LTE useless beyond a
+few centimetres [1]. Acoustic communication works over much longer distances but requires
+Article version: 21st February 2026
+Proposal for Problem Statement 3, Hackenza 20262
+dedicated transducer hardware that no consumer device carries. Divers still communicate by
+hand signal.
+Chi et al. [2] showed that an unmodified smartphone suffices for optical communication over
+2.4-7.6 m in daylight and up to 9.8 m at night, using only the rear LED and camera. Their key
+finding is counterintuitive: water scattering, which intuition says should degrade the optical
+signal, is actually beneficial. Mie scattering from suspended particles concentrates forward-
+scattered light toward the receiver, effectively acting as a gain stage. Rayleigh scattering from
+smaller particles broadens the illuminated area at the sensor, enlarging the Region of Interest
+(RoI) and relaxing alignment requirements. Water absorption suppresses off-axis ambient light
+and improves contrast. The scattering effects are exploited throughout this design rather than
+suppressed.
+Our proposal takes the physical model of Chi et al. as its foundation and focuses on the
+reliability and implementability gap: how to build a system that demonstrably works under
+real device motion and ambient light variation, within a 24-hour development window with no
+external hardware. Every design choice in this document is evaluated against two criteria: does
+it address a real failure mode, and can a four-person team implement and debug it under time
+pressure.
+2 Problem Statement
+Four failure modes jointly govern system reliability. Each is addressed by a distinct layer of
+the proposed codec; the correspondence is made explicit in Section 5.
+• Burst errors from scattering.A scattering event can extinguish a photon pulse entirely,
+corrupting a contiguous run of bits rather than a single isolated bit. Standard convolutional
+codes designed for independent bit errors are overwhelmed when the burst length exceeds
+the code’s error-correcting capability. The underwater channel is not an AWGN channel;
+the codec must be designed accordingly.
+• Stripe uniformity failure.Long identical-bit runs produce wide uniform stripes in the
+captured frame. A single ambient light flicker across a 20-row uniform stripe inverts all 20
+bit decisions simultaneously - a burst error generated by the modulation structure itself,
+before any channel impairment has occurred.
+• Amplitude threshold drift.Simple ON/OFF Keying (OOK) requires the decoder to
+know the correct brightness boundary between a transmitted 1 and a transmitted 0. This
+boundary drifts continuously with distance, water clarity, and ambient light. A threshold
+calibrated at message start can be completely wrong by message end.
+• RoI drift and illumination change.Device motion shifts the RoI position and shape
+between frames. Changing ambient light shifts absolute luminance levels. A fixed RoI
+boundary or fixed threshold fails under either condition.
+The hardware constraint is absolute: only the rear flashlight, camera, IMU, and ambient light
+sensor may be used. No external optics, lenses, or hardware of any kind.
+3 Technical Background
+3.1The Rolling Shutter Effect and Data Rate
+CMOS sensors expose pixel rows sequentially rather than simultaneously. Each row is read at
+a time offset τr after the previous one; at 30 fps with 720 active rows,τr ≈46µ s. A flashlight
+toggling at 180 Hz (one ON/OFF cycle every 5.56 ms) produces approximately 6 complete toggle
+Proposal for Problem Statement 3, Hackenza 20263
+cycles per frame: 6 bright/dark stripe pairs, each encoding one raw bit. The effective user data
+rate after all encoding overheads is:
+Stage Rate Reasoning
+Raw stripes 180 bps 6 stripes/frame×30 fps
+After 4-PPM 90 bps 2 data bits per 4-slot symbol
+After 4B5B RLL 72 bps 5 bits transmitted per 4 data bits
+After rate- 1
+2 conv. code≈36 bps 2 output bits per input bit
+Effective user data rate ≈36 bps Sufficient for 5-10 word messages
+Table 1:Data rate budget at 30 fps, 180 Hz.A 10-word message ( ≈60 characters, 480 user bits) transmits in
+≈13 s, which is acceptable for diver communication. Higher-fps devices (60/120/240 fps) multiply the effective rate
+proportionally with no codec changes. The design deliberately prioritises robustness over throughput.
+3.2Underwater Light Propagation
+Optical intensity follows Beer-Lambert decay:
+I(z) =I 0 e−cz,(1)
+where c is the total attenuation coefficient (c≈0.15 m−1 for a clear laboratory pool, 0.3-0.6 m−1
+for a recreational pool). Two scattering regimes modify the received energy budget:
+• Mie scatteringfrom particles comparable in size to the light wavelength is strongly
+forward-directed (asymmetry parameter g≈0.92 for pool water). It concentrates the
+transmitted beam, increasing the fraction of photons captured within the camera aperture
+relative to geometrically ballistic propagation. This acts as a passive gain stage.
+• Rayleigh scatteringfrom smaller particles is approximately isotropic. It enlarges the
+illuminated area at the sensor, expanding the RoI and making signal detection more
+forgiving of angular misalignment. As the RoI grows, more image rows carry the signal,
+providing within-stripe SNR improvement through row-mean averaging.
+Both effects are exploited rather than filtered. The system is designed around the scattering
+properties of the channel, not against them.
+Chromatic dispersion arises because water’s refractive index varies with wavelength. At 20◦C,
+n(450 nm)≈1.3393 and n(650 nm)≈1.3312 . The resulting group delay differential is small
+in absolute terms but represents a meaningful fraction of a symbol slot at higher symbol rates,
+motivating per-channel soft-value weighting at the decoder.
+3.3Why Each Encoding Layer Is Distinct
+The four encoding layers are not redundant. The convolutional code efficiently corrects
+isolated bit errors but is overwhelmed by a burst of 20 consecutive errors. Block interleaving
+converts that 20-bit burst into 20 isolated single-bit errors across 20 separate codewords, each
+of which the Viterbi decoder then corrects individually. RLL coding prevents the wide uniform
+stripes that produce burst errors at the demodulator before any channel impairment. PPM
+removes amplitude threshold dependence entirely, which no amount of adaptive thresholding
+can fully solve because the threshold algorithm itself requires a valid signal to estimate from.
+Each layer’s contribution is measured independently in the ablation study (Section 7).
+Proposal for Problem Statement 3, Hackenza 20264
+4 Proposed System Design
+The system is a native Android application in Kotlin using Camera2 for frame capture and
+CameraManager for torch control. Native Android is chosen over Flutter or React Native
+because the torch must toggle at 180 Hz (half-period: 2.77 ms). Cross-platform bridges introduce
+2-10 ms of variable jitter per API call - nearly one full bit period of uncertainty - making reliable
+timing impossible. Native Kotlin on a dedicated HandlerThread at maximum priority with a
+busy-wait timing loop achieves sub-millisecond jitter.
+4.1Encoding Pipeline
+4.1.1Stage 1: Convolutional Coding with Block Interleaving
+Convolutional code.A rate- 1/2, constraint-length-4 ( K= 4 ) code is used. Generator
+polynomials G1 = [1,0,1,1] , G2 = [1,1,0,1] (octal 13, 15) give an 8-state trellis with free
+distance df = 6, sufficient to correct up to 3 isolated bit errors per codeword. This is a deliberate
+choice over the theoretically stronger K= 7 (64-state trellis, df = 10): the 8-state trellis is small
+enough to be drawn on paper, verified by hand, and unit-tested exhaustively in under an hour. A
+subtle shift-register ordering error in a K= 7 decoder produces BER that is indistinguishable
+from a bad channel; the same error in aK= 4decoder fails the unit test immediately.
+Technical report note: K= 7 (NASA polynomials G1 =0133 8, G2 =0171 8, df = 10 )
+is the theoretically optimal target for this channel and is validated in Python simulation for
+the write-up. The mobile demo uses K= 4 ; upgrading to K= 7 requires only changing the
+polynomial constants and traceback length with no architectural changes.
+Block interleaving (depth 20).This is the most important single reliability addition in the
+system, and it costs approximately 15 lines of code. The convolutional encoder’s output is
+written into a matrix row by row and transmitted column by column. At the receiver, the inverse
+operation is applied before Viterbi decoding. A burst of B consecutive channel errors maps
+to one error in each of B different matrix columns after de-interleaving, spreading across B
+separate codewords. With depth 20, any burst of up to 20 consecutive errors - the typical range
+for scattering events in pool water - is completely dispersed into 20 isolated single-bit errors,
+each independently correctable by the Viterbi decoder. Without the interleaver, a 15-bit scattering
+burst exceeds the K= 4 code’s correcting capability and decoding fails; with it, the same burst
+is trivially handled.
+4.1.2Stage 2: 4B5B Run-Length Limited Coding
+The 4B5B code maps every 4-bit input nibble to a 5-bit codeword from a fixed standardised
+lookup table (used identically in 100BASE-TX Ethernet and USB), ensuring no codeword
+contains more than 3 consecutive identical bits. Both the encoding and decoding tables are 16
+entries each and require no design work.
+Without RLL coding, UTF-8 text routinely produces long runs of zeros (null bytes, space
+characters, common ASCII). These produce wide dark stripes. The camera auto-exposure
+responds by increasing ISO, permanently shifting the brightness baseline and corrupting the
+adaptive threshold - a failure that no threshold adaptation can recover from because the estimation
+algorithm relies on valid signal statistics. With 4B5B guaranteeing kR = 3, no stripe exceeds
+3 rows, keeping transitions frequent enough for reliable threshold estimation. The 25% rate
+overhead is included in Table 1.
+4.1.3Stage 3: 4-PPM Modulation
+4-position Pulse Position Modulation divides each symbol period into 4 equal time slots. The
+transmitter places an ON pulse in exactly one slot; the other three are OFF. Each symbol encodes
+Proposal for Problem Statement 3, Hackenza 20265
+2 bits as the index of the active slot:
+Data bits Active slot Flash pattern
+00 0 ON, OFF, OFF, OFF
+01 1 OFF, ON, OFF, OFF
+10 2 OFF, OFF, ON, OFF
+11 3 OFF, OFF, OFF, ON
+Table 2:4-PPM symbol table.The decoder identifies the slot with the highest energy - a relative comparison
+requiring no knowledge of absolute brightness. This makes symbol detection completely independent of amplitude
+threshold drift.
+This is the most important individual reliability improvement in the system. OOK permanently
+couples symbol detection to an amplitude threshold that drifts with distance, turbidity, and
+ambient light. No adaptive threshold can track this perfectly across a 13-second message. PPM
+removes the coupling entirely: even if brightness changes by a factor of three during transmission,
+the correct slot still has the highest energy relative to the other three.
+Using soft values rather than hard binary decisions at the PPM decoder is additionally critical
+when scattering blurs a pulse across two adjacent slots. The hard decoder picks one arbitrarily
+(50% error rate on that symbol); the soft decoder recognises the ambiguity, assigns low confidence
+to both slots, and passes the uncertainty to the Viterbi decoder, which uses code context from
+adjacent symbols to resolve it.
+4.1.4Stage 4: Preamble and Frame Structure
+Each frame is structured as:
+[32-symbol alternating preamble] [0xDEADBEEF sync word]
+[payload] [CRC-16]
+The alternating preamble (10101010...) serves three functions before the payload begins: the
+receiver locates the stripe pattern in the frame; estimates the actual row period τr empirically by
+measuring stripe widths (correcting for hardware variation between phone models); and calibrates
+the initial adaptive threshold from the known ON/OFF values of the alternating sequence. The
+32-bit sync word enables frame boundary detection via cross-correlation with a tolerance of
+4 errors (88% match threshold); this tolerance is essential because the preamble itself may be
+damaged by the burst errors that motivated the codec design.
+4.2Decoding Pipeline
+4.2.1Camera Configuration: Fixed Exposure is Non-Negotiable
+Android’s auto-exposure algorithm adjusts sensor gain and shutter time continuously. A
+single AE step midway through a message shifts all luminance values and corrupts dozens of
+consecutive bits - a burst error generated entirely by the receiver’s own software, indistinguishable
+at the codec level from a channel impairment. This is the most common silent failure in naive
+implementations. The Camera2 capture session must be configured as follows before any signal
+processing begins.
+Exposure time of 2 ms is shorter than one flash half-period (2.77 ms), ensuring each sensor
+row captures a definite ON or OFF state. ISO 800 provides sufficient sensitivity at underwater
+light levels without saturation. Verify thatSENSOR EXPOSURE TIME is constant across frames
+inCaptureResult: some manufacturer HALs partially overrideCONTROL AE MODE OFF.
+If it varies, add per-frame luminance normalisation (divide each frame’s row means by its global
+mean) before thresholding.
+Proposal for Problem Statement 3, Hackenza 20266
+4.2.2Stage 1: RoI Detection
+The Y-plane of eachYUV 420 888frame is extracted and the mean luminance of each row
+is computed across all columns. The RoI is located using global frame statistics:
+1. Compute the global mean µ and standard deviation σ of all row-mean values in the frame.
+2. Mark rowias a candidate RoI row if its mean exceedsµ+ 1.5σ.
+3. Find the largest contiguous band of candidate rows; return it as the active RoI.
+4. If fewer than 15 rows are marked, flag the frame as invalid and skip it.
+Track RoI boundaries with an exponential moving average (coefficient 0.3) to absorb device
+motion without accumulating drift. Scattering is an asset here: the enlarged illuminated area
+from Rayleigh scattering means more rows exceed the threshold in pool conditions, making RoI
+detection easier in water than in air.
+4.2.3Stage 2: Adaptive Threshold Demodulation
+Within the detected RoI, a per-row decision threshold is computed from a sliding window of
+30 surrounding rows:
+τi =µ w,i +ω σ w,i, ω= 0.5,(2)
+where µw,i and σw,i are the mean and standard deviation of row-mean luminance in the window
+[i−15, i+15] . Row i decodes to bit 1 if its luminance exceedsτi. Simultaneously, a floating-point
+soft confidence value is produced for the Viterbi decoder:
+λi = clip
+ lumi −τ i
+2σ w,i
++ 0.5,0,1
+
+,(3)
+where λi >0.5 indicates confidence toward bit 1. This recovers approximately 2 dB of additional
+coding gain at no implementation cost beyond storing a float.
+4.2.4Stage 3: Preamble Sync and PPM Demodulation
+The receiver slides the known sync word across the decoded hard-bit sequence and takes the
+position with the highest match fraction above 88% as the frame boundary. Frames with no
+position above 88% are discarded; frames that pass the CRC-16 check are decoded.
+For each 4-PPM symbol slot, the soft value λ of each of the 4 sub-intervals is compared; the
+sub-interval with the highest value is the decoded symbol, and its 2-bit index is the output.
+4.2.5Stages 4-6: 4B5B Decode, De-Interleave, Viterbi
+The standard 4B5B reverse lookup table decodes each 5-bit word. The depth-20 block de-
+interleaver reverses the column-major read order, converting dispersed channel errors back into a
+sequence for the Viterbi decoder. The soft-decision Viterbi decoder operates on the 8-state trellis
+with branch metric:
+M(b) =λ·w burst(b),(4)
+where λ is the soft confidence from (3) and wburst(b) accounts for the correlated burst structure
+of the underwater channel: wburst = 0.6 for a burst-consistent mismatch (two consecutive
+mismatches) and 1.0 for an isolated mismatch. This reflects the prior that in the underwater
+channel, consecutive errors are more probable than isolated errors - isolated-error paths are
+penalised more heavily than burst-error paths. Traceback length is5(K−1) = 15bits.
+Proposal for Problem Statement 3, Hackenza 20267
+4.3Torch Timing: Busy-Wait is Required
+Thread.sleep() has 1-2 ms of variable jitter on Android. At 180 Hz (half-period 2.77 ms),
+a 2 ms jitter event corrupts timing by 72% of one bit period. A scheduled thread has the same
+problem. The only reliable approach is a busy-wait loop on a maximum-priority thread:
+// TorchController.kt - HandlerThread at THREAD_PRIORITY_URGENT_AUDIO
+fun transmitBits(bits: BooleanArray) {
+val halfPeriodNs = 2_777_778L // nanoseconds
+var nextNs = SystemClock.elapsedRealtimeNanos()
+for (bit in bits) {
+cameraManager.setTorchMode(cameraId, bit)
+nextNs += halfPeriodNs
+while (SystemClock.elapsedRealtimeNanos() < nextNs) { / * spin */ }
+}
+}
+Use Process.setThreadPriority(THREAD PRIORITY URGENT AUDIO) rather
+than Thread.MAX PRIORITY: the former is the correct Android constant for time-critical
+audio/sensor threads and achieves lower OS preemption rates in practice. Validate with a
+slow-motion video (240 fps): count stripes per second and confirm180±5Hz.
+4.4Speech Interface and Controls
+Android’sSpeechRecognizer with EXTRA PREFER OFFLINE = true converts voice
+to text on-device; the resulting String passes directly into the encoding pipeline. The de-
+coded String at the receiver is spoken via TextToSpeech. Both sit behind a String-in
+/ String-out interface; if STT is unavailable offline, a text field replaces it with zero codec
+changes. V olume-up triggers push-to-talk; a gyroscope Z-axis peak exceeding 3 rad/s with
+300 ms debounce provides an alternative for gloved underwater operation.
+5 Reliability Strategy
+Each failure mode from Section 2 is handled at the earliest possible stage in the pipeline:
+• Burst errors.The depth-20 block interleaver disperses bursts of up to 20 consecutive
+errors into isolated single-bit errors across 20 separate codewords. The Viterbi decoder’s
+burst branch metric (4) further exploits the correlation structure of underwater errors that
+the standard Hamming metric ignores. Together, these two components give the K= 4
+code burst-resilience comparable to a much stronger uncoded system.
+• Stripe uniformity failure.4B5B guarantees no run exceeds 3 bits, bounding stripe width
+to 3 rows. An ambient flicker that would have corrupted a 20-row uniform stripe now
+affects at most 3 rows - a correctable isolated error.
+• Amplitude threshold drift.4-PPM removes the problem at source: symbol detection is
+relative (which of four slots is brightest), not absolute. The adaptive threshold (2) handles
+the residual ON/OFF boundary needed for per-row soft values and no longer needs to be
+perfectly calibrated.
+• RoI drift and illumination change.Fixed manual exposure prevents AE-induced lu-
+minance steps. The sigma-threshold RoI detector re-runs on every frame with no stored
+position model. The sliding-window threshold (2) recomputes local statistics each frame
+without cross-frame state.
+Proposal for Problem Statement 3, Hackenza 20268
+None of these components attempt to suppress scattering. Consistent with Chi et al. [ 2],
+scattering is a structural property of the channel to be modelled and exploited, not a noise source
+to be removed.
+6 MVP Definition and Demo Plan
+Minimum Viable Product.The MVP is the smallest subset that produces a credible live
+demonstration: a short text string transmitted from phone A and decoded on phone B, in a
+scattering medium, with BER<10 −2. Text input drives the encoder; decoded text is displayed.
+V oice is added on top once the codec round-trip is verified. The MVP scope is exactly the output
+of Phases 1-3 of the implementation plan; Phase 4 wraps it with voice and evaluation.
+Demo sequence.Each step is independently recordable; a failure at a later step does not
+invalidate earlier ones.
+1. In-air at 0.5 m, dark room.Transmit "HELLO WORLD" . Show raw camera frames with
+RoI bounding box overlay and the decoded string appearing in real time. Establishes that
+the codec, timing, and demodulation pipeline all function.
+2. Scattering medium at 1 m.Add dilute milk solution (1 ml whole milk per 10 l water,
+µs ≈0.3 m−1). Show that the RoIenlargesrelative to in-air, confirming the scattering
+benefit predicted by Rayleigh theory. Record BER.
+3. Ambient light robustness.With a lamp pointed at the receiver under the scattering medium,
+show that the decoded string is still recovered. The adaptive threshold (2) tracks the
+brightness change; the PPM decoder is unaffected by the absolute shift.
+4. Voice round-trip.Speak a short phrase into phone A; hear it from phone B. Record for the
+submission video.
+7 Evaluation Plan
+Metric Condition Baseline
+BER Static, 1 m, scattering medium Uncoded OOK, fixed threshold
+BER Hand-held motion, 1 m Uncoded OOK, fixed threshold
+Decode success rate 50-2000 lux ambient light Fixed-threshold demodulation
+Ablation: no interleaving Static, 1 m Full system
+Ablation: OOK instead of PPM Static, 1 m Full system
+Ablation: no RLL Static, 1 m Full system
+Ablation: hard Viterbi vs soft Static, 1 m Hard Viterbi as lower bound
+K= 7vsK= 4BER (Python) Simulated burst channelK= 4as lower bound
+Table 3:Evaluation conditions.BER is computed over at least 1000 transmitted bits per trial, minimum three
+trials per condition, reported as mean ± standard deviation. The ablation study measures each layer’s individual
+contribution by removing it while keeping all others active. The milk solution proxy simulates moderate turbidity
+without a large pool. The K= 7 comparison is a Python simulation result. Success targets: BER <10 −2 at 1 m
+with ambient light; decode success rate>90%; BER coded <0.1×BER uncoded static.
+8 Constraints
+• Hardware.Only the rear flashlight, camera, IMU, and ambient light sensor may be used.
+No external optics, lenses, waterproof housings with optical modifications, or secondary
+microcontrollers.
+Proposal for Problem Statement 3, Hackenza 20269
+• Time.24 hours from project start to working demo. All components must be implemented,
+integrated, and tested within this window.
+• Environment.The primary test environment is a water tank or dilute milk solution proxy.
+Performance is not guaranteed in highly turbid environments (harbours, estuaries) or at
+distances beyond 2 m with the baseline codec.
+• Device.Two Android smartphones with Camera2 API Level 3 ( MANUAL SENSOR capa-
+bility confirmed) and a rear LED flash. The implementation targets minimum SDK 26. iOS
+is excluded because A VFoundation does not expose equivalent per-row timing controls.
+• Data rate.The system targets robustness, not throughput. At 30 fps/180 Hz, effective user
+data rate is ≈36 bps. This is sufficient for 5-10 word messages; it is not a general-purpose
+communication channel.
+9 Limitations
+• Hardware torch ceiling.Achievable toggle rate varies by device. If 180 Hz is unsus-
+tainable, the fallback is 90 Hz (halving data rate). No codec changes are required; this is
+detected and resolved in Phase 2 before integration begins.
+•K= 4 free distance.The demo codec has df = 6. The gap relative to K= 7 (df = 10) is
+most significant at distances beyond 2 m or in high-turbidity water. K= 7 performance is
+quantified in the Python simulation; the upgrade path on mobile is a two-constant change.
+• Interleaver buffering latency.A depth-20 interleaver must accumulate a full 20-codeword
+matrix before the first bit can be transmitted. At 36 bps effective rate, this adds ≈0.6 s of
+latency per message, which is acceptable for the target use case.
+• Partial flashlight/camera occlusion.On most devices, the flashlight housing partially
+occludes the camera’s near field, reducing effective RoI height and maximum achievable
+data rate.
+• Waterproof case refraction.A plastic case introduces a refractive interface and Fresnel
+reflection not modelled in any profile. Per-case empirical tuning is required.
+• High device velocity.Rapid longitudinal motion between phones changes effective path
+length within a single frame, producing sub-row stripe position shifts. The EMA tracker
+handles slow drift; fast motion is a known limitation.
+• Turbid environment coverage.Profiles cover clear pool, moderate freshwater, and the
+milk-solution proxy. Harbours, estuaries, or heavily disturbed water are outside the tested
+range.
+10 Future Scope
+•K= 7 mobile deployment.The Python simulation demonstrates the BER improvement.
+The mobile upgrade is a two-constant change; a profiling pass in Phase 3 determines
+whether the target device can sustain 64-state Viterbi within the 33 ms frame budget.
+• Monte Carlo-tuned generator polynomials.The Henyey-Greenstein photon tracer
+produces the burst error length distribution p(L) for the target operating conditions. A
+polynomial sweep over all K= 7 pairs selects the generators that minimise the weighted
+path metric along the most probable burst paths in the actual channel, rather than the
+AWGN-optimal NASA polynomials [6].
+Proposal for Problem Statement 3, Hackenza 202610
+• Adaptive modulation.Per-slot soft value variance during the preamble estimates current
+channel quality. This estimate drives adaptive selection of PPM order (2-, 4-, 8-PPM) and
+interleaver depth, maximising throughput in good conditions while maintaining robustness
+in poor ones - the same approach used in Wi-Fi and LTE rate adaptation.
+• Cross-frame Kalman tracking.The current EMA boundary tracker absorbs slow drift but
+does not predict fast motion. A constant-velocity Kalman filter on RoI boundary position
+would improve tracking under active swimming, reducing motion-induced frame discards.
+• IMU-gated frame weighting.Accelerometer magnitude correlates with frame blur.
+Rather than discarding high-motion frames entirely, a motion weight derived from IMU
+could down-weight their contribution to the soft-value combiner, preserving throughput
+while reducing blur-induced BER.
+• Fresnel lens and periscope accessories.Excluded by problem constraints, but both
+are natural hardware extensions. A Fresnel lens increases effective gain and extends
+range; a periscope separates the flashlight and camera optical paths, eliminating the partial
+occlusion limitation.
+11 Deliverables
+• A native Android (Kotlin / Camera2) application implementing: busy-wait torch driver
+at 180 Hz, fixed-exposure camera pipeline, sigma-threshold RoI detector with EMA
+tracking, sliding-window adaptive threshold with soft-value output, 4-PPM modulator and
+demodulator, 4B5B encoder/decoder, depth-20 block interleaver/de-interleaver, K= 4
+soft-decision Viterbi decoder with burst branch metric, sync-word frame detection with
+CRC-16, and offline-capable voice interface.
+• A Python script implementing the K= 7 convolutional code with burst-channel BER
+curves comparing K= 7 against K= 4 , and the simulated burst error length distribution
+used to setw burst.
+• A demonstration video: in-air round-trip, scattering medium test with RoI overlay and
+enlargement visible, ambient-light robustness, and a complete voice message round-trip.
+• Quantitative evaluation table (Table 3) with ablation study and mean ± standard deviation
+across≥3trials per condition.
+• Success criterion:BER <10 −2 at 1 m in scattering medium with ambient light variation;
+intelligible voice decode over a complete round-trip; BERcoded <0.1× BERuncoded static.
+12 Implementation Plan
+The key structural decision is that the entire codec is implemented and unit-tested as pure
+Kotlin classes before any hardware is touched. A codec bug found through a physical device in
+hour 16 is nearly impossible to distinguish from channel noise. The same bug caught by a JUnit
+test in hour 3 takes five minutes to fix.
+12.1Phase 1: Codec - Pure Kotlin, No Hardware (Hours 0-5)
+Create the Android project (Kotlin, min SDK 26). Implement all codec components in
+com/uflash/codec/and validate each with JUnit before wiring them together.
+ConvEncoder.kt. K= 4 , G1 = [1,0,1,1] , G2 = [1,1,0,1] , 3-bit shift register.Test:encode
+the all-zeros sequence; verify output against the known zero-state codeword.
+Proposal for Problem Statement 3, Hackenza 202611
+Phase Hours Exit Checkpoint
+1. Codec (pure Kotlin, JUnit) 0-5 "HELLO"survives 5% injected BER
+2. Hardware (torch + camera) 5-10 Stripe visible;10101010at>90%
+3. Integration (text round-trip) 10-17 "HELLO"round-trip at 0.5 m in air
+4. Scattering test, voice, evaluation 17-24 V oice phrase decoded at 1 m in medium
+Table 4:24-hour implementation schedule.Phase 1 is entirely hardware-free. Fallback at each checkpoint is
+pre-defined in the risk register.
+BlockInterleaver.kt.Write bits row-by-row into a matrix, read column-by-column. Depth 20.
+Test:interleave then de-interleave a known sequence; verify exact identity recovery.
+RLLCodec.kt.Standard 4B5B lookup table, 16 entries.Test:encode all 16 nibbles; confirm
+no output contains more than 3 consecutive identical bits; confirm decode inverts encode exactly.
+PPMCodec.kt.Encode: 2 input bits → index ∈ {0,1,2,3} → 4-bit pattern with 1 in indexed
+position. Decode: return index of maximum over 4 soft values.Test:all four 2-bit values produce
+unique patterns; decode recovers each input.
+ViterbiDecoder.kt.8-state trellis, branch metric M(b) =λ·w burst(b) from (4), traceback
+length 15.Test:encode 200-bit random sequence; apply BlockInterleaver; inject burst
+errors of length 2-4; de-interleave; decode; verify BER<0.02.
+Encoder.kt / Decoder.kt.Chain all stages in order.Test:encode "HELLO WORLD" with 0
+errors; verify exact string recovery. Inject 5% random bit errors; verify BER <1% after decode.
+Phase 1 exit checkpoint.Do not proceed until this passes.
+12.2Phase 2: Hardware - Torch Driver and Camera Pipeline (Hours 5-10)
+TorchController.kt.HandlerThread at THREAD PRIORITY URGENT AUDIO with the
+busy-wait loop from Section 4.3.Validate: slow-motion video at 240 fps; count stripes per
+second; confirm 180±5 Hz. Fallback: if unsustainable, set half-period for 90 Hz. No codec
+changes.
+CameraEngine.kt.Camera2 session with fixed-exposure configuration from Section 4.2.
+YUV 420 888 at 1280×720 , 30 fps. Verify by logging Y-plane row means to Logcat in a dark
+room: alternating high/low values should appear at the flash position.Fallback: reduce to 480p
+if frame rate is insufficient.
+RoI detector + adaptive threshold.Implement Section 4.2 Stages 1-2. Transmit a looping
+10101010 pattern.Checkpoint: >90% accuracy across 100 consecutive frames. If below,
+sweep ω from 0.2 to 1.0 in steps of 0.1. If AE is partially active (checkSENSOR EXPOSURE TIME
+inCaptureResult), add per-frame normalisation.
+12.3Phase 3: Integration - Full Text Round-Trip (Hours 10-17)
+Connect Encoder→TorchController on phone A andCameraEngine→Decoder
+on phone B. Add preamble sync detection (88% match threshold) and CRC-16 validation.
+Test with "HELLO" at 0.5 m in a darkened room.Checkpoint: correct round-trip decode.
+Fallback sequence: (1) disable PPM, use OOK - isolates PPM slot boundary bugs from threshold
+bugs; (2) if OOK also fails, issue is in RoI detection or fixed-exposure config; (3) if OOK passes
+but PPM fails, recount rows per slot from a captured frame and fix boundary alignment. Submit
+with the deepest working configuration; document outstanding components.
+Optional (time permitting):extract R/G/B from YUV 420 888 via BT.601 conversion and
+combine per-channel soft values with weights wR = 0.25 , wG = 0.50 , wB = 0.25 (Green is
+least affected by chromatic dispersion and absorption across all pool profiles).
+Proposal for Problem Statement 3, Hackenza 202612
+12.4Phase 4: Scattering Test, Voice Interface, and Evaluation (Hours 17-24)
+Scattering medium.Prepare dilute milk solution (1 ml per 10 l water). Test at 0.5 m and 1 m.
+Log BER to CSV viaFileOutputStreamto external storage.
+Voice interface.Wrap SpeechRecognizer (EXTRA PREFER OFFLINE = true )
+andTextToSpeech.Fallback: text field. Zero codec changes.
+UI.Single ConstraintLayout: TX/RX toggle, push-to-talk button (≥80 dp), σw-derived
+signal quality bar at 4 Hz, scrolling message log.
+Ablation study.Disable each encoding layer in turn at 1 m static; record BER over three
+trials. This is the most valuable content in the write-up and is fully achievable in this phase.
+Demo video.Record raw frames with RoI bounding box overlay, decoded text appearing in
+real time, and the complete voice round-trip.
+12.5Risk Register
+• Torch rate insufficient.Set halfPeriodNs for 90 Hz. Data rate halves; no codec
+changes. Detected in Phase 2 before integration.
+• AE partially overriding manual mode.Monitor SENSOR EXPOSURE TIME across 100
+frames. If it varies, divide each frame’s row means by its global mean before thresholding.
+•Frame rate insufficient at 720p.Reduce to 480p before reducing flash rate.
+• RoI not found.Recount rows per ON interval empirically from a captured frame; update
+rows-per-symbol constant. Recheck that fixed exposure is active.
+• Phase 3 round-trip fails.Disable PPM, then RLL, then interleaving in sequence. Submit
+with the working subset; document outstanding components explicitly.
+• Scattering medium BER exceeds in-air BER by >5× .Extend PPM slot duration by
+one sub-interval. If BER remains high, reduce to 0.5 m; document as range-limited.
+• Codec bug found in Phase 2 or later.This is what Phase 1 unit tests exist to prevent. A
+bug surfacing through hardware is a Phase 1 checkpoint failure: return to Phase 1, fix the
+failing unit test, re-validate, then resume.
+•STT unavailable offline.Switch to text input. Full codec pipeline unaffected.
+• Milk solution inconsistent.Milk fat globule size and concentration vary across products.
+Prepare at 1 ml/10 l and verify BER at 0.5 m before moving to 1 m. Keep plain water
+available for comparison. If BER at 0.5 m exceeds 10−1, the solution is too turbid; dilute
+further.
+13 Feasibility Notes
+An honest assessment of implementation risk within a 24-hour window.
+Lowest risk - implement these first, they will not surprise you:
+• 4B5B encoder/decoder.A 16-entry lookup table. Encode and decode are each a single
+array access. Zero design work, zero tuning, zero state.
+• Block interleaver/de-interleaver.A 2D array transpose, ≈15 lines of Kotlin. The unit
+test is trivial. This is also the single highest reliability improvement per line of code in the
+entire system; do it early.
+Proposal for Problem Statement 3, Hackenza 202613
+• Fixed-exposure camera config.Four Camera2 API lines. The implementation risk is
+near-zero; the hardware risk (partial HAL override) is well-defined and mitigated by
+per-frame normalisation.
+• Voice interface.Well-documented Android APIs behind a String-in / String-out
+wrapper. Zero dependency on the codec.
+Moderate risk - allocate explicit time, expect one iteration:
+• Torch busy-wait timing.The code is simple but the choice ofTHREAD PRIORITY URGENT AUDIO
+over Thread.MAX PRIORITY, and SystemClock. elapsedRealtimeNanos()
+over System.nanoTime(), are both non-obvious. Using the wrong timer source pro-
+duces systematic timing error that looks exactly like a channel problem. Validate early
+with slow-motion video.
+• Adaptive threshold (ω tuning).The formula is simple but the correct value of ω is device-
+dependent and affects everything downstream. Budget 30-45 minutes for the Phase 2
+sweep.
+• PPM slot boundary alignment.Off by even one row in the rows-per-sub-interval count
+breaks PPM entirely and produces BER near 0.75 (3 of 4 slots are wrong for each error).
+The fallback to OOK in the Phase 3 checkpoint sequence exists specifically to isolate this
+failure mode from threshold failures.
+Highest risk - plan explicitly, know your fallback before you start:
+• Sync word detection threshold tuning.Cross-correlation over a noisy bit sequence
+is harder to tune than it looks. An 88% match threshold that is too tight discards valid
+frames; too loose, it produces garbage decodes. Add this to the Phase 1 JUnit suite: inject
+the preamble at noise levels of 0%, 5%, 10%, and 15% BER, verify the 88% threshold
+produces correct accept/reject decisions at each level. Do not discover the right threshold
+value at hardware integration time.
+• End-to-end frame processing latency.All signal processing - Y-plane extraction, row-
+mean computation over 720 rows, RoI detection, threshold demodulation, sync search,
+PPM demodulation, 4B5B decode, de-interleaving, and Viterbi - must complete within
+one frame period (33 ms at 30 fps). Profile on the actual target device in Phase 2. The most
+likely bottleneck is the row-mean loop; replace Kotlin functional operators (.average(),
+.sum()) with a manual loop over the rawByteArrayif timing is tight.
+• The scattering medium test.The milk solution proxy is physically motivated but be-
+haviourally unpredictable across milk products and preparation methods. Prepare it and
+test at 0.5 m before moving to 1 m. If BER at 0.5 m exceeds10−1, dilute further. Critically,
+compare stripe patterns in plain water and milk solution in Logcat before connecting the
+full codec pipeline; confirm the RoI visibly enlarges, which validates the scattering theory
+claim in the demo.
+Proposal for Problem Statement 3, Hackenza 202614
+References
+[1] T. Chen, J. Chan, and S. Gollakota, “Underwater messaging using mobile devices,” inProc. ACM SIGCOMM,
+2022, pp. 545-559.
+[2] Y . Chi, C. Lin, J. Xiong, Y . Sun, L. Wang, and G. Wu, “U-Flash: Improving underwater optical communication
+by scattering effect,”Proc. ACM Interact. Mob. Wearable Ubiquitous Technol., vol. 8, no. 4, 2024.
+[3] H. Buiteveld, J. H. M. Hakvoort, and M. Donze, “Optical properties of pure water,” inOcean Optics XII,
+vol. 2258, 1994, pp. 174-183.
+[4] L. Wang and S. L. Jacques, “Hybrid model of Monte Carlo simulation and diffusion theory for light reflectance
+by turbid media,”J. Opt. Soc. Am. A, vol. 10, no. 8, pp. 1746-1752, 1993.
+[5] Q. Liu and F. Weng, “Combined Henyey-Greenstein and Rayleigh phase function,”Appl. Opt., vol. 45, no. 28,
+pp. 7475-7479, 2006.
+[6] J. G. Proakis and M. Salehi,Digital Communications, 5th ed. McGraw-Hill, 2008.
+[7] K. A. S. Immink, “Runlength-limited sequences,”Proc. IEEE, vol. 78, no. 11, pp. 1745-1759, 1990.
