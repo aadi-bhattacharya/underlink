@@ -1,0 +1,25 @@
+com.underlink
+color black
+color white
+drawable ic_launcher_background
+drawable ic_launcher_foreground
+id btnPtt
+id btnSend
+id etTx
+id progressQuality
+id root
+id scrollRx
+id switchMode
+id tvModeLabel
+id tvQualityLabel
+id tvRxLabel
+id tvRxLog
+id tvTitle
+layout activity_main
+mipmap ic_launcher
+mipmap ic_launcher_round
+string app_name
+style Base_Theme_UFlash
+style Theme_UFlash
+xml backup_rules
+xml data_extraction_rules

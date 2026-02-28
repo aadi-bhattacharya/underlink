@@ -17,9 +17,10 @@ class TorchController(private val cameraManager: CameraManager, private val came
     private val tag = "TorchController"
     private var handlerThread: HandlerThread? = null
     private var handler: Handler? = null
-    
-    // Half period in nanoseconds for 180Hz (1 sec / 180 / 2) -> ~2.77ms
-    private val halfPeriodNs = 2_777_778L 
+
+    // 100 ms per slot = 10 slots/sec.
+    // Camera at 30fps delivers ~3 frames per slot — sufficient for majority-vote detection.
+    private val halfPeriodNs = 100_000_000L
 
     fun start() {
         if (handlerThread != null) return
@@ -63,22 +64,22 @@ class TorchController(private val cameraManager: CameraManager, private val came
                 for (bit in bits) {
                     // 1. Set the torch state (true for ON, false for OFF)
                     cameraManager.setTorchMode(cameraId, bit)
-                    
+
                     // 2. Calculate the exact nanosecond time the Next state should be applied
                     nextNs += halfPeriodNs
-                    
+
                     // 3. Busy-wait spin loop to guarantee sub-millisecond precision
                     while (SystemClock.elapsedRealtimeNanos() < nextNs) {
                         /* spin to win */
                     }
                 }
-                
+
                 // Ensure torch is turned off at the end of transmission
                 cameraManager.setTorchMode(cameraId, false)
             } catch (e: CameraAccessException) {
                 Log.e(tag, "Failed to access camera for torch mode", e)
             } finally {
-                // Notify via callback that transmission is complete so calling thread isn't blocked 
+                // Notify via callback that transmission is complete so calling thread isn't blocked
                 callback?.invoke()
             }
         }

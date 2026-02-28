@@ -9,26 +9,6 @@
     tools:context=".MainActivity"
     android:padding="16dp">
 
-    <!-- Hidden legacy views to avoid "unresolved reference" if old MainActivity code still expects them -->
-    <TextureView
-        android:id="@+id/textureView"
-        android:layout_width="0dp"
-        android:layout_height="0dp"
-        android:visibility="gone"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent" />
-
-    <Button
-        android:id="@+id/btnTestFlash"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Test Flash"
-        android:visibility="gone"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintEnd_toEndOf="parent" />
-
-    <!-- Title -->
     <TextView
         android:id="@+id/tvTitle"
         android:layout_width="0dp"
@@ -40,7 +20,6 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <!-- Mode switch row -->
     <TextView
         android:id="@+id/tvModeLabel"
         android:layout_width="wrap_content"
@@ -55,11 +34,10 @@
         android:id="@+id/switchMode"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="PTT"
+        android:text="TX Mode"
         app:layout_constraintBaseline_toBaselineOf="@id/tvModeLabel"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <!-- TX input -->
     <EditText
         android:id="@+id/etTx"
         android:layout_width="0dp"
@@ -71,7 +49,6 @@
         app:layout_constraintEnd_toEndOf="parent"
         android:layout_marginTop="12dp" />
 
-    <!-- Send / PTT buttons -->
     <Button
         android:id="@+id/btnSend"
         android:layout_width="0dp"
@@ -80,7 +57,6 @@
         app:layout_constraintTop_toBottomOf="@id/etTx"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toStartOf="@id/btnPtt"
-        app:layout_constraintHorizontal_chainStyle="spread"
         android:layout_marginTop="12dp"
         android:layout_marginEnd="8dp" />
 
@@ -95,7 +71,6 @@
         android:layout_marginTop="12dp"
         android:layout_marginStart="8dp" />
 
-    <!-- RX Log -->
     <TextView
         android:id="@+id/tvRxLabel"
         android:layout_width="wrap_content"
@@ -125,9 +100,9 @@
             android:layout_height="wrap_content"
             android:text="(waiting for RX...)"
             android:textSize="13sp" />
+
     </ScrollView>
 
-    <!-- Quality bar -->
     <TextView
         android:id="@+id/tvQualityLabel"
         android:layout_width="wrap_content"

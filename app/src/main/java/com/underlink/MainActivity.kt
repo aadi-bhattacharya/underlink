@@ -1,116 +1,175 @@
-import com.underlink.R
+package com.underlink
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.hardware.camera2.CameraManager
 import android.os.Bundle
+import android.widget.Button
+import android.widget.EditText
 import android.widget.ProgressBar
 import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import com.google.android.material.button.MaterialButton
-import com.google.android.material.switchmaterial.SwitchMaterial
-import com.google.android.material.textfield.TextInputEditText
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import com.underlink.codec.Codec
+import com.underlink.codec.Framer
+import com.underlink.hardware.CameraEngine
+import com.underlink.hardware.Demodulator
+import com.underlink.hardware.TorchController
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var modeSwitch: SwitchMaterial
-    private lateinit var txPanel: androidx.constraintlayout.widget.ConstraintLayout
-    private lateinit var rxPanel: androidx.constraintlayout.widget.ConstraintLayout
+    // These IDs match activity_main.xml exactly
+    private lateinit var switchMode:      Switch
+    private lateinit var etTx:            EditText
+    private lateinit var btnSend:         Button
+    private lateinit var btnPtt:          Button
+    private lateinit var tvRxLog:         TextView
+    private lateinit var scrollRx:        ScrollView
+    private lateinit var progressQuality: ProgressBar
 
-    private lateinit var pttButton: MaterialButton
-    private lateinit var sendButton: MaterialButton
-    private lateinit var messageInput: TextInputEditText
-    private lateinit var txStatus: TextView
+    private lateinit var cameraManager: CameraManager
+    private lateinit var cameraId: String
+    private var torchController: TorchController? = null
+    private var cameraEngine: CameraEngine? = null
 
-    private lateinit var rxLog: TextView
-    private lateinit var clearLogButton: MaterialButton
-    private lateinit var qualityBar: ProgressBar
-    private lateinit var logScroll: ScrollView
+    private val codec = Codec()
+
+    private val demodulator = Demodulator(slotMs = 100L) { rawBits, linkQuality ->
+        runOnUiThread { onRawBitsReceived(rawBits, linkQuality) }
+    }
+    private var rxBitBuffer = IntArray(0)
+
+    companion object {
+        private const val PERMISSIONS_REQUEST = 42
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        bindViews()
-        setupModeToggle()
-        setupTxControls()
-        setupRxControls()
+        switchMode      = findViewById(R.id.switchMode)
+        etTx            = findViewById(R.id.etTx)
+        btnSend         = findViewById(R.id.btnSend)
+        btnPtt          = findViewById(R.id.btnPtt)
+        tvRxLog         = findViewById(R.id.tvRxLog)
+        scrollRx        = findViewById(R.id.scrollRx)
+        progressQuality = findViewById(R.id.progressQuality)
 
-        appendLog("App started. Voice disabled for now.")
+        cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
+        cameraId = cameraManager.cameraIdList.firstOrNull() ?: "0"
+
+        checkPermissions()
     }
 
-    private fun bindViews() {
-        modeSwitch = findViewById(R.id.modeSwitch)
-        txPanel = findViewById(R.id.txPanel)
-        rxPanel = findViewById(R.id.rxPanel)
-
-        pttButton = findViewById(R.id.pttButton)
-        sendButton = findViewById(R.id.sendButton)
-        messageInput = findViewById(R.id.messageInput)
-        txStatus = findViewById(R.id.txStatus)
-
-        rxLog = findViewById(R.id.rxLog)
-        clearLogButton = findViewById(R.id.clearLogButton)
-        qualityBar = findViewById(R.id.qualityBar)
-        logScroll = findViewById(R.id.logScroll)
+    override fun onDestroy() {
+        super.onDestroy()
+        torchController?.stop()
+        cameraEngine?.stopCamera()
     }
 
-    private fun setupModeToggle() {
-        modeSwitch.isChecked = true // TX mode default
-        updateModeUi(isTx = true)
+    private fun checkPermissions() {
+        val needed = listOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+            .filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+        if (needed.isEmpty()) onPermissionsReady()
+        else ActivityCompat.requestPermissions(this, needed.toTypedArray(), PERMISSIONS_REQUEST)
+    }
 
-        modeSwitch.setOnCheckedChangeListener { _, isChecked ->
-            updateModeUi(isTx = isChecked)
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == PERMISSIONS_REQUEST) {
+            if (grantResults.all { it == PackageManager.PERMISSION_GRANTED }) onPermissionsReady()
+            else log("ERROR: Camera permission denied.")
         }
     }
 
-    private fun updateModeUi(isTx: Boolean) {
-        txPanel.visibility = if (isTx) android.view.View.VISIBLE else android.view.View.GONE
-        rxPanel.visibility = if (isTx) android.view.View.GONE else android.view.View.VISIBLE
-        modeSwitch.text = if (isTx) "TX Mode" else "RX Mode"
-    }
-
-    private fun setupTxControls() {
-        // Voice placeholder
-        pttButton.setOnClickListener {
-            txStatus.text = "Status: voice not wired yet"
+    private fun onPermissionsReady() {
+        torchController = TorchController(cameraManager, cameraId).also { it.start() }
+        cameraEngine = CameraEngine(this, cameraManager, cameraId).also { engine ->
+            engine.onFrameProcessedListener = { rowMeans -> demodulator.onFrame(rowMeans) }
         }
 
-        // Typed message send
-        sendButton.setOnClickListener {
-            val text = messageInput.text?.toString()?.trim().orEmpty()
-            if (text.isEmpty()) {
-                txStatus.text = "Status: type something first"
-                return@setOnClickListener
+        switchMode.isChecked = true
+        switchMode.text = "TX Mode"
+        setTxUiEnabled(true)
+
+        switchMode.setOnCheckedChangeListener { _, isTx ->
+            switchMode.text = if (isTx) "TX Mode" else "RX Mode"
+            setTxUiEnabled(isTx)
+            if (isTx) {
+                cameraEngine?.stopCamera()
+                demodulator.reset()
+                log("→ TX mode. Point flash at receiver.")
+            } else {
+                rxBitBuffer = IntArray(0)
+                demodulator.reset()
+                cameraEngine?.startCamera()
+                log("→ RX mode. Calibrating 500ms — hold still...")
             }
-            txStatus.text = "Status: sending typed message…"
-            sendMessage(text)
+        }
+
+        btnPtt.setOnClickListener { log("Voice TX not implemented yet.") }
+
+        btnSend.setOnClickListener {
+            val text = etTx.text?.toString()?.trim().orEmpty()
+            if (text.isEmpty()) { log("Type a message first."); return@setOnClickListener }
+            transmit(text)
+        }
+
+        log("Ready. 100ms/slot.")
+    }
+
+    private fun setTxUiEnabled(enabled: Boolean) {
+        etTx.isEnabled    = enabled
+        btnSend.isEnabled = enabled
+        btnPtt.isEnabled  = enabled
+    }
+
+    private fun transmit(text: String) {
+        val tc = torchController ?: run { log("ERROR: hardware not ready."); return }
+        btnSend.isEnabled = false
+        val encoded = codec.encode(text)
+        val framed  = Framer.wrap(encoded)
+        log("TX \"$text\" → ${framed.size} slots (~${framed.size * 100L / 1000}s)")
+        tc.transmitBits(framed) {
+            runOnUiThread {
+                log("TX complete ✓")
+                btnSend.isEnabled = true
+            }
         }
     }
 
-    private fun setupRxControls() {
-        clearLogButton.setOnClickListener { rxLog.text = "RX log:\n" }
-        qualityBar.progress = 30 // placeholder
+    private fun onRawBitsReceived(rawBits: IntArray, linkQuality: Int) {
+        progressQuality.progress = linkQuality
+        log("RX: ${rawBits.size} slots, quality ${linkQuality}%")
+
+        rxBitBuffer = rxBitBuffer + rawBits
+        var remaining = rxBitBuffer
+        var decoded = false
+
+        while (true) {
+            val result = Framer.tryUnwrap(remaining) ?: break
+            val (payload, leftover) = result
+            remaining = leftover
+            decoded = true
+            log("  Frame: ${payload.size} bits — decoding...")
+            try {
+                val soft = FloatArray(payload.size) { payload[it].toFloat() }
+                val text = codec.decode(soft)
+                log("  ✓ \"$text\"")
+            } catch (e: Exception) {
+                log("  Decode error: ${e.message}")
+            }
+        }
+
+        rxBitBuffer = remaining
+        if (!decoded) log("  No valid frame found.")
     }
 
-    // ===== Glue stubs (codec/hardware later) =====
-    private fun sendMessage(text: String) {
-        appendLog("TX: $text")
-
-        // Later:
-        // val bits = codec.encode(text)
-        // hardware.transmit(bits)
-
-        // Temporary loopback so RX UI shows something:
-        appendLog("RX (simulated): $text")
-    }
-
-    // Person 2 will call this later after camera decode:
-    fun onBitsReceived(bits: IntArray) {
-        val text = "[decoded placeholder] bits=${bits.size}"
-        appendLog("RX: $text")
-    }
-
-    private fun appendLog(line: String) {
-        rxLog.append(line + "\n")
-        logScroll.post { logScroll.fullScroll(android.view.View.FOCUS_DOWN) }
+    private fun log(line: String) {
+        tvRxLog.append("$line\n")
+        scrollRx.post { scrollRx.fullScroll(android.view.View.FOCUS_DOWN) }
     }
 }
