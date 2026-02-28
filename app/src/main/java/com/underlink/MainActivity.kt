@@ -13,7 +13,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var modeSwitch: SwitchMaterial
     private lateinit var txPanel: androidx.constraintlayout.widget.ConstraintLayout
-    private lateinit var rxPanel: andrzoidx.constraintlayout.widget.ConstraintLayout
+    private lateinit var rxPanel: androidx.constraintlayout.widget.ConstraintLayout
 
     private lateinit var pttButton: MaterialButton
     private lateinit var sendButton: MaterialButton
