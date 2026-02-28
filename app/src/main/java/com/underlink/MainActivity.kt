@@ -13,6 +13,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.underlink.audio.VoiceInterface
 import com.underlink.codec.Codec
 import com.underlink.codec.Framer
 import com.underlink.hardware.CameraEngine
@@ -21,7 +22,6 @@ import com.underlink.hardware.TorchController
 
 class MainActivity : AppCompatActivity() {
 
-    // These IDs match activity_main.xml exactly
     private lateinit var switchMode:      Switch
     private lateinit var etTx:            EditText
     private lateinit var btnSend:         Button
@@ -36,6 +36,7 @@ class MainActivity : AppCompatActivity() {
     private var cameraEngine: CameraEngine? = null
 
     private val codec = Codec()
+    private val voiceInterface = VoiceInterface()
 
     private val demodulator = Demodulator(slotMs = 100L) { rawBits, linkQuality ->
         runOnUiThread { onRawBitsReceived(rawBits, linkQuality) }
@@ -68,6 +69,7 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         torchController?.stop()
         cameraEngine?.stopCamera()
+        voiceInterface.shutdown()
     }
 
     private fun checkPermissions() {
@@ -86,6 +88,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onPermissionsReady() {
+        voiceInterface.initialize(this)
+
         torchController = TorchController(cameraManager, cameraId).also { it.start() }
         cameraEngine = CameraEngine(this, cameraManager, cameraId).also { engine ->
             engine.onFrameProcessedListener = { rowMeans -> demodulator.onFrame(rowMeans) }
@@ -110,7 +114,32 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        btnPtt.setOnClickListener { log("Voice TX not implemented yet.") }
+        btnPtt.setOnClickListener {
+            if (btnPtt.text == "SPEAK") {
+                btnPtt.text = "STOP"
+                log("Listening...")
+                voiceInterface.startListening(
+                    onResult = { text ->
+                        runOnUiThread {
+                            btnPtt.text = "SPEAK"
+                            etTx.setText(text)
+                            log("Heard: \"$text\" — transmitting...")
+                            transmit(text)
+                        }
+                    },
+                    onError = {
+                        runOnUiThread {
+                            btnPtt.text = "SPEAK"
+                            log("Voice error — try again.")
+                        }
+                    }
+                )
+            } else {
+                voiceInterface.stopListening()
+                btnPtt.text = "SPEAK"
+                log("Stopped listening.")
+            }
+        }
 
         btnSend.setOnClickListener {
             val text = etTx.text?.toString()?.trim().orEmpty()
@@ -130,13 +159,15 @@ class MainActivity : AppCompatActivity() {
     private fun transmit(text: String) {
         val tc = torchController ?: run { log("ERROR: hardware not ready."); return }
         btnSend.isEnabled = false
+        btnPtt.isEnabled  = false
         val encoded = codec.encode(text)
         val framed  = Framer.wrap(encoded)
-        log("TX \"$text\" → ${framed.size} slots (~${framed.size * 100L / 1000}s)")
+        log("TX \"$text\" -> ${framed.size} slots (~${framed.size * 100L / 1000}s)")
         tc.transmitBits(framed) {
             runOnUiThread {
-                log("TX complete ✓")
+                log("TX complete")
                 btnSend.isEnabled = true
+                btnPtt.isEnabled  = true
             }
         }
     }
@@ -158,7 +189,8 @@ class MainActivity : AppCompatActivity() {
             try {
                 val soft = FloatArray(payload.size) { payload[it].toFloat() }
                 val text = codec.decode(soft)
-                log("  ✓ \"$text\"")
+                log("  \"$text\"")
+                voiceInterface.speak(text) {}
             } catch (e: Exception) {
                 log("  Decode error: ${e.message}")
             }
