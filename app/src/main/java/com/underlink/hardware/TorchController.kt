@@ -12,12 +12,19 @@ class TorchController(
 ) {
     private val TAG = "TorchController"
 
-    val SLOT_MS        = 200L    // one data slot duration
-    val BEACON_MS      = 3000L   // solid ON beacon before message
-    val POST_BEACON_GAP_MS = 1500L  // silence after beacon before payload starts
+    val SLOT_MS            = 200L
+    val BEACON_MS          = 3000L
+    val POST_BEACON_GAP_MS = 1500L
 
     private var thread:  HandlerThread? = null
     private var handler: Handler?       = null
+
+    // REQ-1: cancellation flag
+    @Volatile private var cancelRequested = false
+
+    fun cancelTransmission() {
+        cancelRequested = true
+    }
 
     fun start() {
         thread = HandlerThread("TorchThread", Process.THREAD_PRIORITY_URGENT_AUDIO).also {
@@ -36,42 +43,44 @@ class TorchController(
         runCatching { cameraManager.setTorchMode(cameraId, on) }
     }
 
-    // TX sequence:
-    //   BEACON: 3 seconds solid ON  (receiver detects this)
-    //   GAP:    1.5 seconds OFF     (receiver waits for this to end then starts collecting)
-    //   PAYLOAD: each slot is SLOT_MS of ON or OFF
-    //   END:    torch off — receiver detects end by silence
     fun transmitMessage(payloadSlots: IntArray, onDone: (() -> Unit)? = null) {
         val h = handler ?: run { onDone?.invoke(); return }
+        cancelRequested = false
         h.post {
             try {
                 // 3 second solid beacon
                 torch(true)
-                Thread.sleep(BEACON_MS)
+                val beaconEnd = System.currentTimeMillis() + BEACON_MS
+                while (System.currentTimeMillis() < beaconEnd) {
+                    if (cancelRequested) { torch(false); return@post }
+                    Thread.sleep(50)
+                }
 
                 // 1.5 second silence gap
                 torch(false)
-                Thread.sleep(POST_BEACON_GAP_MS)
+                val gapEnd = System.currentTimeMillis() + POST_BEACON_GAP_MS
+                while (System.currentTimeMillis() < gapEnd) {
+                    if (cancelRequested) { return@post }
+                    Thread.sleep(50)
+                }
 
                 // Payload
                 val payloadStartTime = System.currentTimeMillis()
                 for (i in payloadSlots.indices) {
-                    val slot = payloadSlots[i]
-                    torch(slot == 1)
-                    
+                    if (cancelRequested) break
+                    torch(payloadSlots[i] == 1)
                     val targetTime = payloadStartTime + (i + 1) * SLOT_MS
                     var now = System.currentTimeMillis()
                     while (now < targetTime) {
+                        if (cancelRequested) break
                         val sleepMs = targetTime - now
-                        if (sleepMs > 5) {
-                            Thread.sleep(sleepMs - 2) // Sleep slightly less, then busy-spin for perfection
-                        }
+                        if (sleepMs > 5) Thread.sleep(sleepMs - 2)
                         now = System.currentTimeMillis()
                     }
                 }
 
-                // End — silence is the terminator
                 torch(false)
+                cancelRequested = false
 
             } catch (e: Exception) {
                 Log.e(TAG, "Transmit error: ${e.message}")

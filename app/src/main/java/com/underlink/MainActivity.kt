@@ -6,6 +6,8 @@ import android.hardware.camera2.CameraManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.KeyEvent
+import android.view.WindowManager
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -35,50 +37,48 @@ class MainActivity : AppCompatActivity() {
     private val ui = Handler(Looper.getMainLooper())
 
     // ── RX state machine ─────────────────────────────────────────────────────
-    //
-    // IDLE       → watching for brightness to go high and stay high
-    // BEACON     → brightness is currently high, timing how long it stays on
-    // GAP_WAIT   → beacon confirmed (was on ≥2500ms), waiting for silence gap to end
-    // RECEIVING  → collecting frames until end-silence detected
-    // COOLDOWN   → just decoded, ignoring everything for 3 seconds
-    //
     private enum class RxState { IDLE, BEACON, GAP_WAIT, RECEIVING, COOLDOWN }
 
     @Volatile private var rxState   = RxState.IDLE
     @Volatile private var rxEnabled = false
 
     private val SLOT_MS              = 200L
-    private val BEACON_MIN_MS        = 2500L  // must see brightness for at least this long
-    private val GAP_DARK_FRAMES_MIN  = 15     // ~500ms of dark = gap is underway, start receiving
-    private val END_SILENCE_SLOTS    = 15     // 15 × 200ms = 3 seconds silence = message over
-    private val MIN_PAYLOAD_SLOTS    = 60     // minimum slots for any real message
+    private val BEACON_MIN_MS        = 2500L
+    private val GAP_DARK_FRAMES_MIN  = 15
+    private val END_SILENCE_SLOTS    = 15
+    private val MIN_PAYLOAD_SLOTS    = 60
     private val MAX_SLOTS            = 1000
 
-    // Beacon timing
     private var beaconStartTime = 0L
-
-    // Gap / receiving
     private var darkFrames          = 0
     private var consecutiveOffSlots = 0
-    private var slotBuffer          = mutableListOf<Float>()   // per-slot averages (for end-silence detection)
-    private var frameBuffer         = mutableListOf<Float>()   // frames in the current slot window
-    private var rawStream           = mutableListOf<Pair<Long, Float>>()   // ← NEW: every raw brightness frame stored here
+    private var slotBuffer          = mutableListOf<Float>()
+    private var frameBuffer         = mutableListOf<Float>()
+    private var rawStream           = mutableListOf<Pair<Long, Float>>()
     private var lastSlotTime        = 0L
 
-    // Thresholds
     private var baseline        = 0f
     private var onThreshold     = 0f
     private var beaconThreshold = 0f
 
-    // Calibration
     private var calibrating = false
     private var calibFrames = mutableListOf<Float>()
+
+    // ── TX state ─────────────────────────────────────────────────────────────
+    private var isTransmitting = false
+    private var lastTransmittedText = ""
+
+    // ── Button handler ───────────────────────────────────────────────────────
+    private lateinit var hardwareButtonHandler: HardwareButtonHandler
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        // REQ-11: keep screen on underwater
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         btnMode   = findViewById(R.id.btnMode)
         btnPtt    = findViewById(R.id.btnPtt)
@@ -100,14 +100,118 @@ class MainActivity : AppCompatActivity() {
 
         camera.onBrightness = { brightness -> handleBrightness(brightness) }
 
+        hardwareButtonHandler = HardwareButtonHandler(
+            context = this,
+
+            onPttStart = {
+                ui.post {
+                    voice.stopSpeaking()
+                    voice.startListening(
+                        onResult = { text ->
+                            ui.post {
+                                hardwareButtonHandler.setListening(false)
+                                etInput.setText(text)
+                                transmit(text)
+                            }
+                        },
+                        onError = {
+                            ui.post {
+                                hardwareButtonHandler.setListening(false)
+                                log("STT failed — type instead")
+                            }
+                        }
+                    )
+                }
+            },
+
+            onPttStop = {
+                ui.post {
+                    voice.stopListening()
+                    hardwareButtonHandler.setListening(false)
+                }
+            },
+
+            onModeToggle = {
+                ui.post { btnMode.isChecked = !btnMode.isChecked }
+            },
+
+            onCancelTransmission = {
+                torch.cancelTransmission()
+            },
+
+            onRetransmitLast = {
+                if (lastTransmittedText.isNotEmpty()) {
+                    ui.post { transmit(lastTransmittedText) }
+                }
+            },
+
+            onFlushTts = {
+                voice.stopSpeaking()
+            },
+
+            onRecalibrate = {
+                ui.post {
+                    log("Recalibrating...")
+                    stopRx()
+                    ui.postDelayed({ startRx() }, 300)
+                }
+            },
+
+            onForceDecodeNow = {
+                forceDecodeNow()
+            },
+
+            onClearRxBuffer = {
+                ui.post {
+                    rawStream.clear()
+                    slotBuffer.clear()
+                    frameBuffer.clear()
+                    log("RX buffer manually cleared.")
+                }
+            },
+
+            onReset = {
+                ui.post {
+                    torch.cancelTransmission()
+                    isTransmitting = false
+                    hardwareButtonHandler.setTransmitting(false)
+                    hardwareButtonHandler.setListening(false)
+                    voice.stopListening()
+                    voice.stopSpeaking()
+                    stopRx()
+                    if (!btnMode.isChecked) {
+                        ui.postDelayed({ startRx() }, 300)
+                    }
+                    log("Full reset.")
+                    setStatus("Reset complete.")
+                }
+            }
+        )
+
         checkPermissions()
         setupButtons()
+    }
+
+    // REQ-5: intercept volume keys before system handles them
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (::hardwareButtonHandler.isInitialized &&
+            hardwareButtonHandler.handleKeyEvent(event)) {
+            return true  // consumed — no super call, no volume overlay
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     // ── Buttons ───────────────────────────────────────────────────────────────
 
     private fun setupButtons() {
         btnMode.setOnCheckedChangeListener { _, isTx ->
+            if (isTransmitting) {
+                // Block mode switch during TX
+                btnMode.isChecked = true
+                hardwareButtonHandler.notifyBlocked()
+                return@setOnCheckedChangeListener
+            }
+            hardwareButtonHandler.setMode(isTx)
             if (isTx) {
                 stopRx()
                 torch.start()
@@ -126,11 +230,28 @@ class MainActivity : AppCompatActivity() {
 
         btnPtt.setOnTouchListener { _, event ->
             when (event.action) {
-                android.view.MotionEvent.ACTION_DOWN -> voice.startListening(
-                    onResult = { text -> transmit(text) },
-                    onError  = { log("STT failed — type instead") }
-                )
-                android.view.MotionEvent.ACTION_UP -> voice.stopListening()
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    voice.stopSpeaking()
+                    voice.startListening(
+                        onResult = { text ->
+                            ui.post {
+                                hardwareButtonHandler.setListening(false)
+                                etInput.setText(text)
+                                transmit(text)
+                            }
+                        },
+                        onError = {
+                            ui.post {
+                                hardwareButtonHandler.setListening(false)
+                                log("STT failed — type instead")
+                            }
+                        }
+                    )
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    voice.stopListening()
+                    hardwareButtonHandler.setListening(false)
+                }
             }
             true
         }
@@ -156,20 +277,23 @@ class MainActivity : AppCompatActivity() {
 
     private fun transmit(text: String) {
         log("TX: \"$text\"")
+        lastTransmittedText = text
         val slots = codec.encodeToSlots(text)
         val durationSec = (slots.size * SLOT_MS + 3000 + 1500) / 1000
         log("Sending " + slots.size + " slots (~" + durationSec + "s total)")
         setStatus("Transmitting — 3s beacon then payload...")
-        
-        // Disable camera receiver before TX. Active CameraCaptureSessions will
-        // intercept and ignore `setTorchMode` requests if they arrive too fast, 
-        // turning our Manchester code into garbage.
+
         stopRx()
-        
+
+        isTransmitting = true
+        hardwareButtonHandler.setTransmitting(true)
+
         torch.transmitMessage(slots) {
-            ui.post { 
-                setStatus("TX done.") 
-                startRx() // Restart listening now that torch is mine
+            ui.post {
+                isTransmitting = false
+                hardwareButtonHandler.setTransmitting(false)
+                setStatus("TX done.")
+                startRx()
             }
         }
     }
@@ -185,7 +309,7 @@ class MainActivity : AppCompatActivity() {
         consecutiveOffSlots = 0
         slotBuffer.clear()
         frameBuffer.clear()
-        rawStream.clear()      // ← clear raw stream on stop
+        rawStream.clear()
         calibFrames.clear()
         camera.stop()
     }
@@ -202,8 +326,8 @@ class MainActivity : AppCompatActivity() {
             calibFrames.clear()
 
             baseline        = amb
-            beaconThreshold = amb + 20f
-            onThreshold     = amb + 30f
+            beaconThreshold = amb + 40f   // increased margins for dark-room reliability
+            onThreshold     = amb + 55f
 
             log("Calibrated: ambient=" + amb.toInt() +
                     "  beaconThr=" + beaconThreshold.toInt() +
@@ -221,7 +345,23 @@ class MainActivity : AppCompatActivity() {
         }, 2000)
     }
 
-    // ── RX: frame handler (~30 calls/sec from camera thread) ─────────────────
+    // ── Force decode — Vol Up long in RX mode ─────────────────────────────────
+
+    private fun forceDecodeNow() {
+        if (rxState != RxState.RECEIVING) return
+        val capturedRaw = rawStream.toList()
+        val slotCount   = slotBuffer.size
+        slotBuffer.clear()
+        rawStream.clear()
+        rxState = RxState.COOLDOWN
+        ui.post {
+            log("Force decode — ${capturedRaw.size} raw frames captured")
+            setStatus("Decoding...")
+        }
+        tryDecode(capturedRaw, slotCount)
+    }
+
+    // ── RX: frame handler (~30 calls/sec from camera thread) ──────────────────
 
     private fun handleBrightness(brightness: Float) {
         if (calibrating) { calibFrames.add(brightness); return }
@@ -232,7 +372,6 @@ class MainActivity : AppCompatActivity() {
 
         when (rxState) {
 
-            // ── IDLE ──────────────────────────────────────────────────────────
             RxState.IDLE -> {
                 if (isBright) {
                     if (beaconStartTime == 0L) beaconStartTime = now
@@ -256,7 +395,6 @@ class MainActivity : AppCompatActivity() {
 
             RxState.BEACON -> { /* unused */ }
 
-            // ── GAP_WAIT ──────────────────────────────────────────────────────
             RxState.GAP_WAIT -> {
                 if (!isBright) {
                     darkFrames++
@@ -266,10 +404,10 @@ class MainActivity : AppCompatActivity() {
                         consecutiveOffSlots = 0
                         slotBuffer.clear()
                         frameBuffer.clear()
-                        rawStream.clear()               // ← fresh raw stream
+                        rawStream.clear()
                         lastSlotTime = System.currentTimeMillis()
                         ui.post {
-                            log("Gap clear — receiving payload (raw stream mode)")
+                            log("Gap clear — receiving payload")
                             setStatus("Receiving...")
                         }
                     }
@@ -278,19 +416,8 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // ── RECEIVING ─────────────────────────────────────────────────────
-            //
-            // Two things happen in parallel:
-            //   1. rawStream  — every single brightness frame is stored here.
-            //      The decoder will use this for accurate phase-aligned slot binning.
-            //   2. slotBuffer — timer-based slot averages, used ONLY for
-            //      end-silence detection (same logic as before).
-            //
             RxState.RECEIVING -> {
-                // 1. Always store the raw frame with its timestamp
                 rawStream.add(Pair(now, brightness))
-
-                // 2. Timer-based slot logic for end-silence detection only
                 frameBuffer.add(brightness)
 
                 if (now - lastSlotTime >= SLOT_MS) {
@@ -303,10 +430,8 @@ class MainActivity : AppCompatActivity() {
                             (onThreshold - baseline + 1f) + 0.5f).coerceIn(0f, 1f)
                     val isOn = softVal > 0.5f
 
-                    // Skip leading OFF slots
                     if (slotBuffer.isEmpty() && !isOn) {
                         lastSlotTime = now
-                        // Still keep rawStream frames — decoder's phase search handles alignment
                     } else {
                         log("Slot " + slotBuffer.size + ": " +
                                 slotBrightness.toInt() + " → " + (if (isOn) "ON " else "OFF") +
@@ -326,14 +451,13 @@ class MainActivity : AppCompatActivity() {
                             rawStream.clear()
                             rxState = RxState.COOLDOWN
                             ui.post {
-                                log("End silence — $slotCount slots / ${capturedRaw.size} raw frames captured")
+                                log("End silence — $slotCount slots / ${capturedRaw.size} raw frames")
                                 setStatus("Decoding...")
                             }
                             tryDecode(capturedRaw, slotCount)
                         }
                     }
 
-                    // Safety cap
                     if (slotBuffer.size > MAX_SLOTS) {
                         val capturedRaw = rawStream.toList()
                         slotBuffer.clear()
@@ -345,7 +469,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // ── COOLDOWN ──────────────────────────────────────────────────────
             RxState.COOLDOWN -> { }
         }
     }
@@ -354,10 +477,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun tryDecode(rawFrames: List<Pair<Long, Float>>, slotCount: Int) {
         Thread {
-            ui.post { log("Trying phase-search decode (${rawFrames.size} raw frames, ~$slotCount slots)") }
+            ui.post { log("Trying decode (${rawFrames.size} raw frames, ~$slotCount slots)") }
 
-            // Pass the midpoint threshold to the Decoder. This prevents the separator from shifting 
-            // due to extra silence slots padding the end of the raw buffer.
             val threshold = (baseline + onThreshold) / 2f
             val text = codec.decodeFromRawStream(rawFrames, threshold)
 
@@ -366,9 +487,11 @@ class MainActivity : AppCompatActivity() {
                     log("✓ Decoded: \"$text\"")
                     setStatus("Got: $text")
                     voice.speak(text)
+                    hardwareButtonHandler.vibrateDecodeResult(true)
                 } else {
                     log("✗ Decode failed (${rawFrames.size} raw frames)")
                     setStatus("Decode failed — check signal then recalibrate")
+                    hardwareButtonHandler.vibrateDecodeResult(false)
                 }
 
                 ui.postDelayed({
@@ -414,6 +537,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        if (::hardwareButtonHandler.isInitialized) hardwareButtonHandler.release()
         torch.stop(); camera.stop(); voice.shutdown()
     }
 }

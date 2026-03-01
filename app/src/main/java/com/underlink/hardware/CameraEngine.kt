@@ -16,6 +16,8 @@ class CameraEngine(
 
     var onBrightness: ((Float) -> Unit)? = null
 
+    @Volatile private var isClosed = false
+
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var reader: ImageReader? = null
@@ -24,6 +26,7 @@ class CameraEngine(
 
     @SuppressLint("MissingPermission")
     fun start() {
+        isClosed = false
         bgThread = HandlerThread("CamBG").also { it.start(); bgHandler = Handler(it.looper) }
         reader = ImageReader.newInstance(640, 480, ImageFormat.YUV_420_888, 3)
         reader!!.setOnImageAvailableListener({ r ->
@@ -91,6 +94,7 @@ class CameraEngine(
 
                 cam.createCaptureSession(listOf(surface), object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(s: CameraCaptureSession) {
+                        if (isClosed) { s.close(); return }
                         session = s
                         s.setRepeatingRequest(req.build(), captureCallback, bgHandler)
                     }
@@ -105,6 +109,7 @@ class CameraEngine(
     }
 
     fun stop() {
+        isClosed = true
         session?.close(); session = null
         device?.close(); device = null
         reader?.close(); reader = null
