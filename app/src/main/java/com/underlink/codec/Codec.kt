@@ -67,16 +67,14 @@ class Codec {
      * That is 3 × 7 = 21 total decode attempts — all fast, no heavy math.
      *
      * @param raw         Raw brightness floats from CameraEngine, one per frame.
-     * @param onThreshold The calibrated ON threshold (used only to find the first
+     * @param baseThreshold The calibrated ON threshold (used only to find the first
      *                    ON frame so we can trim leading silence; actual bit
      *                    decisions use the adaptive median threshold).
-     * @param baseline    The calibrated ambient baseline.
      */
-    fun decodeFromRawStream(raw: List<Pair<Long, Float>>, onThreshold: Float, baseline: Float): String {
+    fun decodeFromRawStream(raw: List<Pair<Long, Float>>, baseThreshold: Float): String {
         if (raw.isEmpty()) return ""
 
-        val edgeThreshold = (baseline + onThreshold) / 2f
-        val firstOnIdx = raw.indexOfFirst { it.second > edgeThreshold }
+        val firstOnIdx = raw.indexOfFirst { it.second > baseThreshold }
         if (firstOnIdx < 0) return ""
 
         val firstOnTime = raw[firstOnIdx].first
@@ -84,13 +82,13 @@ class Codec {
         // Search over phase offsets in ±200ms to find the exact alignment of the 200ms slots
         for (phaseMs in -200..200 step 20) {
             val startTime = firstOnTime + phaseMs
-            val result = tryDecodeTimeBased(raw, startTime, 200L)
+            val result = tryDecodeTimeBased(raw, startTime, 200L, baseThreshold)
             if (result.isNotEmpty()) return result
         }
         return ""
     }
 
-    private fun tryDecodeTimeBased(raw: List<Pair<Long, Float>>, startTime: Long, halfSlotMs: Long): String {
+    private fun tryDecodeTimeBased(raw: List<Pair<Long, Float>>, startTime: Long, halfSlotMs: Long, threshold: Float): String {
         val endTime = raw.last().first
         if (startTime >= endTime) return ""
 
@@ -123,11 +121,7 @@ class Codec {
             }
         }
 
-        // ── Step 2: Adaptive median threshold ────────────────────────────────
-        val sorted    = avgs.toFloatArray().also { it.sort() }
-        val threshold = sorted[sorted.size / 2]
-
-        // ── Step 3: Binarize ──────────────────────────────────────────────────
+        // ── Step 2: Binarize using absolute calibrated threshold ─────────────
         val binary = IntArray(avgs.size) { if (avgs[it] > threshold) 1 else 0 }
         val binStr = binary.joinToString("")
         android.util.Log.d("Codec", "Phase ${startTime - raw[0].first}ms | Bins: $binStr")

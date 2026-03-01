@@ -356,8 +356,10 @@ class MainActivity : AppCompatActivity() {
         Thread {
             ui.post { log("Trying phase-search decode (${rawFrames.size} raw frames, ~$slotCount slots)") }
 
-            // Pass the raw brightness stream + timestamps + thresholds
-            val text = codec.decodeFromRawStream(rawFrames, onThreshold, baseline)
+            // Pass the midpoint threshold to the Decoder. This prevents the separator from shifting 
+            // due to extra silence slots padding the end of the raw buffer.
+            val threshold = (baseline + onThreshold) / 2f
+            val text = codec.decodeFromRawStream(rawFrames, threshold)
 
             ui.post {
                 if (text.isNotEmpty()) {
