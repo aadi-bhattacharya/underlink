@@ -32,6 +32,8 @@ package com.underlink.codec
  */
 class Codec {
 
+    data class DecodeResult(val text: String, val violations: Int)
+
     companion object {
         /** Camera runs at ~30 fps; 200 ms per half-slot ≈ 6 frames. */
         const val FRAMES_PER_HALF_SLOT = 6
@@ -79,21 +81,27 @@ class Codec {
 
         val firstOnTime = raw[firstOnIdx].first
 
+        val results = mutableListOf<DecodeResult>()
+
         // Search over phase offsets in ±200ms to find the exact alignment of the 200ms slots
         for (phaseMs in -200..200 step 20) {
             val startTime = firstOnTime + phaseMs
-            val result = tryDecodeTimeBased(raw, startTime, 200L, baseThreshold)
-            if (result.isNotEmpty()) return result
+            val res = tryDecodeTimeBased(raw, startTime, 200L, baseThreshold)
+            if (res != null) {
+                results.add(res)
+            }
         }
-        return ""
+
+        // Return the one with minimum violations
+        return results.minByOrNull { it.violations }?.text ?: ""
     }
 
-    private fun tryDecodeTimeBased(raw: List<Pair<Long, Float>>, startTime: Long, halfSlotMs: Long, threshold: Float): String {
+    private fun tryDecodeTimeBased(raw: List<Pair<Long, Float>>, startTime: Long, halfSlotMs: Long, threshold: Float): DecodeResult? {
         val endTime = raw.last().first
-        if (startTime >= endTime) return ""
+        if (startTime >= endTime) return null
 
         val numHalfSlots = ((endTime - startTime) / halfSlotMs).toInt() + 1
-        if (numHalfSlots < 16) return ""
+        if (numHalfSlots < 16) return null
 
         val sums = FloatArray(numHalfSlots)
         val counts = IntArray(numHalfSlots)
@@ -127,6 +135,8 @@ class Codec {
         android.util.Log.d("Codec", "Phase ${startTime - raw[0].first}ms | Bins: $binStr")
 
         // Try decoding with and without dropping the very first partial half-slot
+        var bestForThisPhase: DecodeResult? = null
+
         for (dropFirst in 0..1) {
             val validBinary = if (dropFirst == 1 && binary.isNotEmpty()) binary.copyOfRange(1, binary.size) else binary
             
@@ -169,12 +179,14 @@ class Codec {
 
                 // Sanity check: every character must be printable ASCII
                 if (text.isNotEmpty() && text.all { it.code in 32..126 }) {
-                    return text
+                    if (bestForThisPhase == null || violations < bestForThisPhase!!.violations) {
+                        bestForThisPhase = DecodeResult(text, violations)
+                    }
                 }
             }
         }
         
-        return ""
+        return bestForThisPhase
     }
 
     // ── Encoding utilities ────────────────────────────────────────────────────
